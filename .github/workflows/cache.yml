@@ -1,5 +1,9 @@
 name: cache
 
+concurrency:
+  group: cache
+  cancel-in-progress: false
+
 on:
   workflow_dispatch:
   schedule:
@@ -10,6 +14,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v2
+      with:
+        fetch-depth: 0
     - uses: actions/setup-python@v2
       with:
         python-version: '3.8'
@@ -17,11 +23,28 @@ jobs:
       run: |-
         python -m pip install -U pip
         pip install -r requirements.txt
-    - name: Fetch, cache and compress bootstrap data.
-      run: python cache.py
-    - name: Fetch, cache and compress fixture data.
-      run: python cache.py --url https://fantasy.premierleague.com/api/fixtures/ --cache cache/fixtures
-    - name: Push updated cache.
+    - name: Fetch and validate latest data.
+      run: |
+        latest_dir=$(mktemp -d)
+        echo "LATEST_DIR=${latest_dir}" >> "$GITHUB_ENV"
+        python latest.py --out "${latest_dir}" --historical-cache cache
+        test "$(find "${latest_dir}" -maxdepth 1 -type f | wc -l)" -eq 4
+        python - "${latest_dir}" <<'PY'
+        import json
+        import lzma
+        import sys
+        from pathlib import Path
+
+        directory = Path(sys.argv[1])
+        with (directory / 'manifest.json').open(encoding='utf-8') as f:
+            manifest = json.load(f)
+        assert isinstance(manifest['current_gameweek'], int)
+        assert manifest['generated_at'].endswith('Z')
+        for name in ('bootstrap', 'fixtures', 'live'):
+            with lzma.open(directory / manifest[name], 'rt', encoding='utf-8') as f:
+                json.load(f)
+        PY
+    - name: Push historical cache.
       run: |
         git config user.name "Automated"
         git config user.email "actions@users.noreply.github.com"
@@ -29,3 +52,11 @@ jobs:
         timestamp=$(date -u)
         git commit -m "Updated cache @ ${timestamp}" || exit 0
         git push
+    - name: Publish latest branch atomically.
+      run: |
+        git switch --orphan latest
+        git rm -rf .
+        cp "${LATEST_DIR}"/* .
+        git add bootstrap.json.xz fixtures.json.xz live.json.xz manifest.json
+        git commit -m "Update latest data"
+        git push --force origin HEAD:latest
