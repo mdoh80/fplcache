@@ -60,7 +60,7 @@ def _validate_fixtures(fixtures):
         ids.add(fixture['id'])
 
 
-def validate(bootstrap, fixtures, live):
+def validate_bootstrap_and_fixtures(bootstrap, fixtures):
     if not isinstance(bootstrap, dict):
         raise ValueError('bootstrap data must be a JSON object')
     element_ids = _validate_elements(bootstrap.get('elements'), 'bootstrap data')
@@ -80,12 +80,24 @@ def validate(bootstrap, fixtures, live):
     if len(current) != 1 or current[0]['id'] <= 0:
         raise ValueError('bootstrap data must contain one current gameweek')
     _validate_fixtures(fixtures)
+    return current[0]['id']
+
+
+def validate_live(bootstrap, live):
+    if not isinstance(bootstrap, dict):
+        raise ValueError('bootstrap data must be a JSON object')
     if not isinstance(live, dict):
         raise ValueError('live data must be a JSON object')
+    element_ids = _validate_elements(bootstrap.get('elements'), 'bootstrap data')
     live_ids = _validate_elements(live.get('elements'), 'live data')
     if live_ids != element_ids:
         raise ValueError('live data elements do not match bootstrap data')
-    return current[0]['id']
+
+
+def validate(bootstrap, fixtures, live):
+    current_gameweek = validate_bootstrap_and_fixtures(bootstrap, fixtures)
+    validate_live(bootstrap, live)
+    return current_gameweek
 
 
 def write_json(path, data):
@@ -101,10 +113,10 @@ def main(args):
     print('Fetching fixture data... ', end='', flush=True)
     fixtures = fetch(args.fixtures_url)
     print('OK.')
-    current_gameweek = validate(bootstrap, fixtures, {'elements': []})
+    current_gameweek = validate_bootstrap_and_fixtures(bootstrap, fixtures)
     print(f'Fetching live gameweek {current_gameweek} data... ', end='', flush=True)
     live = fetch(args.live_url.format(event_id=current_gameweek))
-    current_gameweek = validate(bootstrap, fixtures, live)
+    validate_live(bootstrap, live)
     print('OK.')
 
     generated_at = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
