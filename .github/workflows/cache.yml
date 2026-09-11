@@ -1,27 +1,38 @@
 name: cache
 
+permissions:
+  contents: write
+
+concurrency:
+  group: cache
+  cancel-in-progress: false
+
 on:
   workflow_dispatch:
   schedule:
     - cron: '3 0,6,12,18 * * *'
 
 jobs:
-  cache:
+  historical-cache:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v2
-    - uses: actions/setup-python@v2
+    - uses: actions/checkout@v4
       with:
-        python-version: '3.8'
+        fetch-depth: 0
+        ref: main
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.x'
     - name: Install requirements.
       run: |-
         python -m pip install -U pip
         pip install -r requirements.txt
-    - name: Fetch, cache and compress bootstrap data.
+    - name: Fetch and cache bootstrap data.
       run: python cache.py
-    - name: Fetch, cache and compress live gameweek data.
+    - name: Fetch and cache live gameweek data.
       run: |-
-        event_id=$(python - <<'PY'
+        event_id=$(python - <<'PY2'
         import json
         import lzma
         from pathlib import Path
@@ -36,18 +47,86 @@ jobs:
 
         current = next(event for event in data['events'] if event['is_current'])
         print(current['id'])
-        PY
+        PY2
         )
         python cache.py \
           --url "https://fantasy.premierleague.com/api/event/${event_id}/live/" \
           --cache cache/live
-    - name: Fetch, cache and compress fixture data.
+    - name: Fetch and cache fixture data.
       run: python cache.py --url https://fantasy.premierleague.com/api/fixtures/ --cache cache/fixtures
-    - name: Push updated cache.
+    - name: Push historical cache.
       run: |
         git config user.name "Automated"
         git config user.email "actions@users.noreply.github.com"
         git add -A
         timestamp=$(date -u)
         git commit -m "Updated cache @ ${timestamp}" || exit 0
-        git push
+        git push origin HEAD:main
+
+  latest:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        ref: main
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.x'
+    - name: Install requirements.
+      run: |-
+        python -m pip install -U pip
+        pip install -r requirements.txt
+    - name: Fetch and validate latest data.
+      run: |
+        set -euo pipefail
+        latest_dir=$(mktemp -d)
+        python latest.py --out "${latest_dir}"
+        test "$(find "${latest_dir}" -maxdepth 1 -type f | wc -l)" -eq 4
+        python - "${latest_dir}" <<'PY2'
+        import json
+        import lzma
+        import sys
+        from pathlib import Path
+
+        directory = Path(sys.argv[1])
+        expected = {'bootstrap.json.xz', 'fixtures.json.xz', 'live.json.xz', 'manifest.json'}
+        assert {path.name for path in directory.iterdir()} == expected
+        with (directory / 'manifest.json').open(encoding='utf-8') as f:
+            manifest = json.load(f)
+        assert set(manifest) == {'bootstrap', 'fixtures', 'live', 'current_gameweek', 'generated_at'}
+        assert isinstance(manifest['current_gameweek'], int)
+        assert manifest['generated_at'].endswith('Z')
+        for name in ('bootstrap', 'fixtures', 'live'):
+            assert manifest[name] == f'{name}.json.xz'
+            with lzma.open(directory / manifest[name], 'rt', encoding='utf-8') as f:
+                json.load(f)
+        PY2
+        echo "LATEST_DIR=${latest_dir}" >> "$GITHUB_ENV"
+    - name: Publish latest branch atomically.
+      run: |
+        set -euo pipefail
+        git config user.name "Automated"
+        git config user.email "actions@users.noreply.github.com"
+        index_dir=$(mktemp -d)
+        index_file="${index_dir}/index"
+        GIT_INDEX_FILE="${index_file}" git read-tree --empty
+        for name in bootstrap.json.xz fixtures.json.xz live.json.xz manifest.json; do
+          blob=$(git hash-object -w "${LATEST_DIR}/${name}")
+          GIT_INDEX_FILE="${index_file}" git update-index --add --cacheinfo "100644,${blob},${name}"
+        done
+        tree=$(GIT_INDEX_FILE="${index_file}" git write-tree)
+
+        git fetch origin latest || true
+        parent_args=()
+        if git show-ref --verify --quiet refs/remotes/origin/latest; then
+          latest_parent=$(git rev-parse refs/remotes/origin/latest)
+          parent_args=(-p "${latest_parent}")
+          lease="--force-with-lease=refs/heads/latest:${latest_parent}"
+        else
+          latest_parent=''
+          lease='--force-with-lease=refs/heads/latest:0000000000000000000000000000000000000000'
+        fi
+        commit=$(printf 'Update latest data\n' | git commit-tree "${tree}" "${parent_args[@]}" -m 'Update latest data')
+        git push "${lease}" origin "${commit}:refs/heads/latest"
