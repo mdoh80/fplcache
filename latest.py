@@ -22,21 +22,69 @@ def fetch(url):
     return response.json()
 
 
+def _is_int(value):
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _validate_elements(elements, name):
+    if not isinstance(elements, list) or not elements:
+        raise ValueError(f'{name} must contain a non-empty elements list')
+    ids = set()
+    for element in elements:
+        if not isinstance(element, dict) or not _is_int(element.get('id')):
+            raise ValueError(f'{name} contains an invalid element')
+        if element['id'] in ids:
+            raise ValueError(f'{name} contains duplicate element ids')
+        ids.add(element['id'])
+    return ids
+
+
+def _validate_fixtures(fixtures):
+    if not isinstance(fixtures, list) or not fixtures:
+        raise ValueError('fixture data must be a non-empty JSON list')
+    ids = set()
+    for fixture in fixtures:
+        required = ('id', 'event', 'team_h', 'team_a', 'finished')
+        if not isinstance(fixture, dict):
+            raise ValueError('fixture data contains an invalid fixture')
+        if any(key not in fixture for key in required):
+            raise ValueError('fixture data contains an incomplete fixture')
+        if not _is_int(fixture['id']) or fixture['id'] in ids:
+            raise ValueError('fixture data contains invalid or duplicate ids')
+        if fixture['event'] is not None and not _is_int(fixture['event']):
+            raise ValueError('fixture data contains an invalid gameweek')
+        if not _is_int(fixture['team_h']) or not _is_int(fixture['team_a']):
+            raise ValueError('fixture data contains invalid team ids')
+        if not isinstance(fixture['finished'], bool):
+            raise ValueError('fixture data contains an invalid finished flag')
+        ids.add(fixture['id'])
+
+
 def validate(bootstrap, fixtures, live):
     if not isinstance(bootstrap, dict):
         raise ValueError('bootstrap data must be a JSON object')
-    if not isinstance(bootstrap.get('elements'), list):
-        raise ValueError('bootstrap data has no elements list')
+    element_ids = _validate_elements(bootstrap.get('elements'), 'bootstrap data')
     events = bootstrap.get('events')
-    if not isinstance(events, list):
-        raise ValueError('bootstrap data has no events list')
-    current = [event for event in events if event.get('is_current')]
-    if len(current) != 1 or not isinstance(current[0].get('id'), int):
+    if not isinstance(events, list) or not events:
+        raise ValueError('bootstrap data must contain a non-empty events list')
+    event_ids = set()
+    current = []
+    for event in events:
+        if not isinstance(event, dict) or not _is_int(event.get('id')):
+            raise ValueError('bootstrap data contains an invalid event')
+        if event['id'] in event_ids:
+            raise ValueError('bootstrap data contains duplicate event ids')
+        event_ids.add(event['id'])
+        if event.get('is_current') is True:
+            current.append(event)
+    if len(current) != 1 or current[0]['id'] <= 0:
         raise ValueError('bootstrap data must contain one current gameweek')
-    if not isinstance(fixtures, list):
-        raise ValueError('fixture data must be a JSON list')
-    if not isinstance(live, dict) or not isinstance(live.get('elements'), list):
-        raise ValueError('live data has no elements list')
+    _validate_fixtures(fixtures)
+    if not isinstance(live, dict):
+        raise ValueError('live data must be a JSON object')
+    live_ids = _validate_elements(live.get('elements'), 'live data')
+    if live_ids != element_ids:
+        raise ValueError('live data elements do not match bootstrap data')
     return current[0]['id']
 
 
@@ -44,12 +92,6 @@ def write_json(path, data):
     with lzma.open(path, 'wt', encoding='utf-8') as f:
         json.dump(data, f, indent=4, sort_keys=True)
 
-
-def historical_path(cache, generated_at, name=''):
-    directory = cache / name / Path(
-        f'{generated_at.year}/{generated_at.month}/{generated_at.day}')
-    directory.mkdir(parents=True, exist_ok=True)
-    return directory / f'{generated_at.hour:02d}{generated_at.minute:02d}.json.xz'
 
 
 def main(args):
@@ -70,11 +112,6 @@ def main(args):
     write_json(args.out / 'bootstrap.json.xz', bootstrap)
     write_json(args.out / 'fixtures.json.xz', fixtures)
     write_json(args.out / 'live.json.xz', live)
-    if args.historical_cache:
-        write_json(historical_path(args.historical_cache, generated_at), bootstrap)
-        write_json(historical_path(args.historical_cache, generated_at, 'fixtures'), fixtures)
-        write_json(historical_path(args.historical_cache, generated_at, 'live'), live)
-
     manifest = {
         'generated_at': generated_at.isoformat().replace('+00:00', 'Z'),
         'current_gameweek': current_gameweek,
@@ -93,7 +130,6 @@ if __name__ == '__main__':
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     parser.add_argument('--out', type=Path, default=Path('latest-publish'), help='latest output path')
-    parser.add_argument('--historical-cache', type=Path, default=Path('cache'), help='historical cache path')
     parser.add_argument('--bootstrap-url', default='https://fantasy.premierleague.com/api/bootstrap-static/', help='bootstrap URL')
     parser.add_argument('--fixtures-url', default='https://fantasy.premierleague.com/api/fixtures/', help='fixtures URL')
     parser.add_argument('--live-url', default='https://fantasy.premierleague.com/api/event/{event_id}/live/', help='live data URL')
