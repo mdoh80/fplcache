@@ -1,7 +1,7 @@
 {
     "bootstrap": "bootstrap.json.xz",
-    "current_gameweek": 4,
+    "current_gameweek": 5,
     "fixtures": "fixtures.json.xz",
-    "generated_at": "2026-09-18T16:18:12Z",
+    "generated_at": "2026-09-18T20:49:22Z",
     "live": "live.json.xz"
 }
